@@ -33,6 +33,75 @@ MAIL_PASS      = ""                  # App-Passwort
 MAIL_FROM      = ""
 
 SERVER_CREATE_COST = 10              # Tokens um einen Server zu erstellen
+PREMIUM_COST       = 500             # Tokens to buy Premium
+OWNER_EMAIL        = "jakub.sontag14@gmail.com"  # Site owner email
+
+# ── Rank system ──
+RANKS = [
+    ("Novice",   0,    "#6b7280"),
+    ("Chatter",  100,  "#3b82f6"),
+    ("Active",   500,  "#10b981"),
+    ("Veteran",  1500, "#8b5cf6"),
+    ("Elite",    3000, "#f59e0b"),
+    ("Legend",   6000, "#ef4444"),
+]
+
+QUESTS = [
+    ("send_first_msg",   "Send your first message",        "💬", 20),
+    ("send_10_msgs",     "Send 10 messages",               "🗣️", 50),
+    ("send_50_msgs",     "Send 50 messages",               "📢", 150),
+    ("add_first_friend", "Add your first friend",          "👥", 30),
+    ("join_server",      "Join a server",                  "🖥️", 40),
+    ("create_server",    "Create a server",                "🏗️", 60),
+    ("open_ticket",      "Open a support ticket",          "🎫", 25),
+    ("change_avatar",    "Set a profile picture",          "🖼️", 35),
+    ("send_dm",          "Send your first DM",             "📨", 30),
+    ("reach_chatter",    "Reach Chatter rank",             "🌟", 100),
+    ("reach_active",     "Reach Active rank",              "🔥", 200),
+]
+
+def get_rank(xp):
+    rank = RANKS[0]
+    for r in RANKS:
+        if xp >= r[1]:
+            rank = r
+    return rank
+
+def award_xp(uid, amount, db=None):
+    """Give XP, update rank, check quests."""
+    close = False
+    if db is None:
+        import sqlite3 as _sq
+        db = _sq.connect(DB_PATH)
+        db.row_factory = _sq.Row
+        close = True
+    db.execute("UPDATE users SET xp=xp+? WHERE id=?", (amount, uid))
+    user = db.execute("SELECT xp,rank FROM users WHERE id=?", (uid,)).fetchone()
+    if user:
+        new_rank = get_rank(user["xp"])[0]
+        if new_rank != user["rank"]:
+            db.execute("UPDATE users SET rank=? WHERE id=?", (new_rank, uid))
+    db.commit()
+    if close:
+        db.close()
+
+def complete_quest(uid, quest_key, db=None):
+    close = False
+    if db is None:
+        import sqlite3 as _sq
+        db = _sq.connect(DB_PATH)
+        db.row_factory = _sq.Row
+        close = True
+    existing = db.execute("SELECT id FROM user_quests WHERE user_id=? AND quest_key=?", (uid, quest_key)).fetchone()
+    if not existing:
+        reward = next((q[3] for q in QUESTS if q[0]==quest_key), 0)
+        db.execute("INSERT OR IGNORE INTO user_quests (user_id,quest_key,completed,completed_at) VALUES (?,?,1,?)",
+                   (uid, quest_key, now()))
+        db.execute("UPDATE users SET tokens=tokens+? WHERE id=?", (reward, uid))
+        db.commit()
+        award_xp(uid, reward // 2, db)
+    if close:
+        db.close()
 
 # ═══════════════════════════════════════════════════════════════════
 #   IMPORTS
@@ -194,6 +263,33 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN is_premium INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN rank TEXT DEFAULT 'Novice'")
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN xp INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN msg_count INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+    except Exception:
+        pass
+    # quests table
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS user_quests (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            quest_key   TEXT    NOT NULL,
+            completed   INTEGER DEFAULT 0,
+            completed_at TEXT,
+            UNIQUE(user_id, quest_key)
+        );
+    """)
     db.commit()
     db.close()
 
@@ -653,8 +749,8 @@ body::before {
   display: flex; gap: .8rem; align-items: flex-end;
   flex-direction: row;
 }
-.chat-input-area textarea { order: 1; }
-.chat-input-area button   { order: 2; }
+.chat-input-area textarea { order: 1; flex: 1; min-width: 0; }
+.chat-input-area button   { order: 2; flex-shrink: 0; width: auto !important; padding: .75rem 1.4rem; }
 
 .chat-input {
   flex: 1;
@@ -861,6 +957,7 @@ def render_sidebar(active="", user_id=None, extra_servers=None):
         ("🖥️", "Servers",      url_for("servers_page"),  "servers",    0),
         ("🎫", "Support",      url_for("tickets"),       "tickets",    sd["open_tickets"]),
         ("👤", "Profile",      url_for("profile"),       "profile",    0),
+        ("⚡", "Quests",       url_for("quests"),        "quests",     0),
     ]
 
     html = f"""
@@ -901,7 +998,7 @@ def render_sidebar(active="", user_id=None, extra_servers=None):
         {render_avatar(user, "av-sm")}
         <div style="flex:1;min-width:0">
           <div style="font-size:.85rem;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{user["username"]}{pro_badge}</div>
-          <div style="font-size:.7rem;color:var(--text3)">{user["tokens"]} <span class="token-icon">⬡</span> tokens</div>
+          <div style="font-size:.7rem;color:var(--text3)">{user["tokens"]} <span class="token-icon">⬡</span> · <span style="color:{get_rank(user['xp'] if 'xp' in user.keys() else 0)[2]}">{get_rank(user['xp'] if 'xp' in user.keys() else 0)[0]}</span></div>
         </div>
         <a href="{url_for("logout")}" title="Logout" style="color:var(--text3);font-size:1.1rem;text-decoration:none">↩</a>
       </div>
@@ -1050,6 +1147,15 @@ def login():
             else:
                 session["user_id"]  = user["id"]
                 session["username"] = user["username"]
+                # Auto-grant owner role to site owner
+                if user["email"].lower() == OWNER_EMAIL.lower():
+                    db.execute("UPDATE users SET role='owner', is_premium=1 WHERE id=?", (user["id"],))
+                    db.execute("INSERT OR IGNORE INTO premium_users (user_id,granted_at,granted_by) VALUES (?,?,?)",
+                               (user["id"], now(), "System"))
+                    db.commit()
+                    session["is_owner"] = True
+                else:
+                    session["is_owner"] = False
                 return redirect(url_for("dashboard"))
 
     body = f"""
@@ -1165,7 +1271,7 @@ def global_chat():
         init = avatar_initials(m["username"])
         is_self = m["user_id"] == uid
         cls  = "msg-self" if is_self else ""
-        msgs_html += f"""<div class="msg {cls}">
+        msgs_html += f"""<div class="msg {cls}" data-id="{m['id']}">
           <div class="avatar av-sm" style="background:{col}">{init}</div>
           <div class="msg-bubble">
             <div class="msg-header">
@@ -1199,6 +1305,24 @@ def global_chat():
     <script>
       const el = document.getElementById('msgs');
       el.scrollTop = el.scrollHeight;
+      let lastId = 0;
+      const allMsgs = el.querySelectorAll('[data-id]');
+      if(allMsgs.length) lastId = parseInt(allMsgs[allMsgs.length-1].dataset.id||0);
+      async function pollChat(){{
+        try{{
+          const r = await fetch('/chat/poll?after='+lastId);
+          const data = await r.json();
+          if(data.messages && data.messages.length){{
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            data.messages.forEach(m=>{{
+              el.insertAdjacentHTML('beforeend', m.html);
+              lastId = Math.max(lastId, m.id);
+            }});
+            if(atBottom) el.scrollTop = el.scrollHeight;
+          }}
+        }}catch(e){{}}
+      }}
+      setInterval(pollChat, 2500);
     </script>"""
     return APP_BASE("Global Chat", "chat", uid, content)
 
@@ -1216,8 +1340,43 @@ def global_chat_post():
             "INSERT INTO global_messages (user_id,username,content,created_at) VALUES (?,?,?,?)",
             (uid, user["username"], content, now())
         )
+        # XP + quest tracking
+        try:
+            mc = (db.execute("SELECT COUNT(*) as c FROM global_messages WHERE user_id=?",(uid,)).fetchone()["c"])
+            db.execute("UPDATE users SET msg_count=msg_count+1, xp=xp+2 WHERE id=?", (uid,))
+            db.commit()
+            complete_quest(uid, "send_first_msg", db)
+            if mc >= 10:  complete_quest(uid, "send_10_msgs", db)
+            if mc >= 50:  complete_quest(uid, "send_50_msgs", db)
+            # Update rank
+            u2 = db.execute("SELECT xp FROM users WHERE id=?",(uid,)).fetchone()
+            new_rank = get_rank(u2["xp"])[0]
+            db.execute("UPDATE users SET rank=? WHERE id=?", (new_rank, uid))
+            db.commit()
+        except Exception:
+            pass
         db.commit()
     return redirect(url_for("global_chat"))
+
+@app.route("/chat/poll")
+@login_required
+def chat_poll():
+    after = request.args.get("after", 0, type=int)
+    uid   = session["user_id"]
+    db    = get_db()
+    msgs  = db.execute(
+        "SELECT gm.*, u.avatar_color FROM global_messages gm JOIN users u ON u.id=gm.user_id WHERE gm.id>? ORDER BY gm.id ASC LIMIT 30",
+        (after,)
+    ).fetchall()
+    results = []
+    for m in msgs:
+        col  = m["avatar_color"] or "#6366f1"
+        init = avatar_initials(m["username"])
+        is_self = m["user_id"] == uid
+        cls  = "msg-self" if is_self else ""
+        html = f'''<div class="msg {cls}" data-id="{m["id"]}"><div class="avatar av-sm" style="background:{col}">{init}</div><div class="msg-bubble"><div class="msg-header"><span class="msg-name" style="color:{col}">{m["username"]}</span><span class="msg-time">{m["created_at"][11:16]}</span></div><div class="msg-text">{m["content"]}</div></div></div>'''
+        results.append({"id": m["id"], "html": html})
+    return jsonify({"messages": results})
 
 # ═══════════════════════════════════════════════════════════════════
 #   FRIENDS
@@ -1330,6 +1489,10 @@ def friend_add():
                    (uid,target["id"],now()))
         db.commit()
         session["fr_msg"] = f"Friend request sent to {target_n}!"
+        try:
+            complete_quest(uid, "add_first_friend", db)
+        except Exception:
+            pass
     return redirect(url_for("friends"))
 
 @app.route("/friends/accept/<int:request_id>", methods=["POST"])
@@ -1885,6 +2048,23 @@ def profile():
     uname = session["username"]
     db    = get_db()
     user  = db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
+    # Ensure new columns exist
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN avatar_data TEXT")
+        db.commit()
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN is_premium INTEGER DEFAULT 0")
+        db.commit()
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN rank TEXT DEFAULT 'Novice'")
+        db.commit()
+    except Exception:
+        pass
+    user  = db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
     msg   = session.pop("profile_msg",None)
     err   = session.pop("profile_err",None)
     col   = user["avatar_color"] or "#6366f1"
@@ -1906,13 +2086,21 @@ def profile():
           </div>
         </div>'''
     else:
-        premium_section = f'''<div class="card" style="border-color:rgba(245,158,11,.2)">
+        premium_section = f'''<div class="card" style="border-color:rgba(245,158,11,.2);background:linear-gradient(135deg,rgba(245,158,11,.03),rgba(236,72,153,.03))">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem">
             <div>
-              <div style="font-weight:800;font-size:1rem">✦ Nexus Premium</div>
-              <div style="color:var(--text2);font-size:.85rem;margin-top:.3rem">Unlimited servers · More tokens · PRO badge · Priority support</div>
+              <div style="font-weight:800;font-size:1rem">✦ Upgrade to Nexus Premium</div>
+              <div style="color:var(--text2);font-size:.85rem;margin-top:.3rem">Unlimited servers · PRO badge · Priority support · Exclusive features</div>
+              <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap">
+                <span class="badge badge-amber">🖼️ Custom avatar</span>
+                <span class="badge badge-purple">🖥️ 10 servers</span>
+                <span class="badge badge-indigo">⚡ XP boost</span>
+                <span class="badge badge-teal">🎫 Priority tickets</span>
+              </div>
             </div>
-            <span class="badge badge-amber" style="font-size:.8rem;padding:.4rem .8rem">Ask an Admin to upgrade you</span>
+            <form method="POST" action="/premium/buy" onsubmit="return confirm('Spend {PREMIUM_COST} tokens for Premium?')">
+              <button type="submit" class="btn btn-amber" style="white-space:nowrap">✦ Buy Premium — {PREMIUM_COST} tokens</button>
+            </form>
           </div>
         </div>'''
 
@@ -1929,6 +2117,7 @@ def profile():
         <div style="margin-top:.5rem;display:flex;gap:.5rem">
           <span class="badge badge-amber">⬡ {user['tokens']} Tokens</span>
           <span class="badge badge-indigo">Since {user['created_at'][:10]}</span>
+          <span class="badge" style="background:rgba(0,0,0,.2);border:1px solid {get_rank(user['xp'] if 'xp' in user.keys() else 0)[2]};color:{get_rank(user['xp'] if 'xp' in user.keys() else 0)[2]}">{get_rank(user['xp'] if 'xp' in user.keys() else 0)[0]}</span>
         </div>
       </div>
     </div>
@@ -2162,6 +2351,122 @@ def custom_page_view(slug):
       <div style="color:var(--text2);line-height:1.8;white-space:pre-wrap">{page["content"]}</div>
     </div>'''
     return APP_BASE(page["title"], f"page_{slug}", uid, content)
+
+
+@app.route("/quests")
+@login_required
+def quests():
+    uid = session["user_id"]
+    db  = get_db()
+    for col_sql in [
+        "ALTER TABLE users ADD COLUMN xp INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN rank TEXT DEFAULT 'Novice'",
+        "ALTER TABLE users ADD COLUMN msg_count INTEGER DEFAULT 0",
+    ]:
+        try: db.execute(col_sql); db.commit()
+        except: pass
+    user = db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
+    completed_keys = set(
+        r["quest_key"] for r in db.execute(
+            "SELECT quest_key FROM user_quests WHERE user_id=? AND completed=1",(uid,)
+        ).fetchall()
+    )
+    try: xp = user["xp"] or 0
+    except: xp = 0
+    rank_info = get_rank(xp)
+    next_rank = None
+    for r in RANKS:
+        if r[1] > xp:
+            next_rank = r
+            break
+
+    quests_html = ""
+    for key, label, icon, reward in QUESTS:
+        done   = key in completed_keys
+        bg     = "rgba(16,185,129,.08)" if done else "var(--surface2)"
+        border = "rgba(16,185,129,.25)" if done else "var(--border)"
+        check  = '<span style="color:var(--emerald);font-size:1.1rem">✓</span>' if done else '<span style="color:var(--text3)">○</span>'
+        quests_html += (
+            f'<div style="display:flex;align-items:center;gap:1rem;padding:.85rem 1rem;'
+            f'background:{bg};border:1px solid {border};border-radius:10px;margin-bottom:.5rem">'
+            f'<span style="font-size:1.3rem">{icon}</span>'
+            f'<div style="flex:1"><div style="font-weight:600;font-size:.92rem">{label}</div>'
+            f'<div style="font-size:.78rem;color:var(--amber)">+{reward} tokens</div></div>'
+            f'{check}</div>'
+        )
+
+    ranks_html = ""
+    for rname, req_xp, color in RANKS:
+        is_cur = rank_info[0] == rname
+        style  = f"border:2px solid {color}" if is_cur else "border:1px solid var(--border)"
+        cur_badge = '<span class="badge badge-green" style="font-size:.68rem">Current</span>' if is_cur else ""
+        ranks_html += (
+            f'<div style="display:flex;align-items:center;gap:.8rem;padding:.65rem 1rem;'
+            f'border-radius:10px;{style};margin-bottom:.4rem">'
+            f'<div style="width:12px;height:12px;border-radius:50%;background:{color};flex-shrink:0"></div>'
+            f'<div style="flex:1;font-weight:{"800" if is_cur else "500"};color:{color if is_cur else "var(--text2)"}">{rname}</div>'
+            f'<div style="font-size:.75rem;color:var(--text3)">{req_xp} XP</div>'
+            f'{cur_badge}</div>'
+        )
+
+    progress_pct = 0
+    if next_rank:
+        span = next_rank[1] - rank_info[1]
+        earned = xp - rank_info[1]
+        progress_pct = int((earned / max(span,1)) * 100)
+
+    prog_bar = ""
+    if next_rank:
+        prog_bar = (
+            f'<div style="font-size:.8rem;color:var(--text3);margin:.6rem 0 .3rem">Progress to {next_rank[0]}: {progress_pct}%</div>'
+            f'<div style="height:8px;background:var(--surface3);border-radius:4px;overflow:hidden">'
+            f'<div style="height:100%;width:{progress_pct}%;background:linear-gradient(90deg,{rank_info[2]},{next_rank[2]});border-radius:4px;transition:width .5s"></div></div>'
+        )
+    else:
+        prog_bar = '<div style="color:var(--amber);font-weight:700;margin-top:.6rem">🏆 Max Rank Reached!</div>'
+
+    page_content = (
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin-bottom:1.2rem">'
+        '<div class="card">'
+        f'<div style="display:flex;align-items:center;gap:1rem;margin-bottom:.8rem">'
+        f'<div style="width:52px;height:52px;border-radius:50%;background:{rank_info[2]};display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:800;color:#fff">{rank_info[0][0]}</div>'
+        f'<div><div style="font-size:1.2rem;font-weight:800;color:{rank_info[2]}">{rank_info[0]}</div>'
+        f'<div style="font-size:.82rem;color:var(--text2)">{xp} XP</div></div></div>'
+        f'{prog_bar}</div>'
+        '<div class="card"><div class="card-title" style="margin-bottom:1rem">🏅 All Ranks</div>'
+        f'{ranks_html}</div></div>'
+        '<div class="card"><div class="card-header">'
+        '<div class="card-title">⚡ Quests — Complete to earn tokens</div>'
+        f'<span class="badge badge-green">{len(completed_keys)}/{len(QUESTS)}</span></div>'
+        f'{quests_html}</div>'
+    )
+    return APP_BASE("Quests & Ranks", "quests", uid, page_content)
+
+
+@app.route("/premium/buy", methods=["POST"])
+@login_required
+def premium_buy():
+    uid  = session["user_id"]
+    db   = get_db()
+    user = db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
+    try: is_premium = user["is_premium"]
+    except: is_premium = 0
+    if is_premium:
+        session["profile_msg"] = "You already have Premium!"
+        return redirect(url_for("profile"))
+    try: tokens = user["tokens"]
+    except: tokens = 0
+    if tokens < PREMIUM_COST:
+        session["profile_err"] = f"Not enough tokens! Need {PREMIUM_COST}, you have {tokens}."
+        return redirect(url_for("profile"))
+    db.execute("UPDATE users SET tokens=tokens-?, is_premium=1 WHERE id=?", (PREMIUM_COST, uid))
+    db.execute("INSERT OR IGNORE INTO premium_users (user_id,granted_at,granted_by) VALUES (?,?,?)",
+               (uid, now(), "Purchase"))
+    db.commit()
+    audit("premium_buy", f"User #{uid} bought Premium", user_id=uid)
+    session["profile_msg"] = "✦ Welcome to Nexus Premium! Enjoy your exclusive perks."
+    return redirect(url_for("profile"))
+
 
 # ═══════════════════════════════════════════════════════════════════
 #   BANNED PAGE
