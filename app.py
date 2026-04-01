@@ -170,7 +170,30 @@ def init_db():
             details    TEXT,
             created_at TEXT    NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS custom_pages (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            title        TEXT    NOT NULL,
+            slug         TEXT    NOT NULL UNIQUE,
+            icon         TEXT    DEFAULT '📄',
+            content      TEXT    NOT NULL,
+            show_sidebar INTEGER DEFAULT 1,
+            created_at   TEXT    NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS premium_users (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL UNIQUE,
+            granted_at TEXT    NOT NULL,
+            granted_by TEXT    NOT NULL
+        );
     """)
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN avatar_data TEXT")
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN is_premium INTEGER DEFAULT 0")
+    except Exception:
+        pass
     db.commit()
     db.close()
 
@@ -627,8 +650,11 @@ body::before {
 .chat-input-area {
   padding: 1rem 1.4rem;
   border-top: 1px solid var(--border);
-  display: flex; gap: .8rem; align-items: center;
+  display: flex; gap: .8rem; align-items: flex-end;
+  flex-direction: row;
 }
+.chat-input-area textarea { order: 1; }
+.chat-input-area button   { order: 2; }
 
 .chat-input {
   flex: 1;
@@ -806,14 +832,26 @@ def get_sidebar_data(user_id):
         "SELECT COUNT(*) as c FROM tickets WHERE user_id=? AND status='open'", (user_id,)).fetchone()["c"]
     return dict(user=user, servers=servers, unread_dms=unread_dms, pending_fr=pending_fr, open_tickets=open_tickets)
 
+def render_avatar(user, size_class="av-sm"):
+    col  = user["avatar_color"] or "#6366f1"
+    init = avatar_initials(user["username"])
+    try:
+        if user["avatar_data"]:
+            return f'<img src="{user["avatar_data"]}" class="avatar {size_class}" style="object-fit:cover">'
+    except Exception:
+        pass
+    return f'<div class="avatar {size_class}" style="background:{col}">{init}</div>'
+
 def render_sidebar(active="", user_id=None, extra_servers=None):
     if user_id is None:
         user_id = session.get("user_id")
     sd = get_sidebar_data(user_id)
     user    = sd["user"]
     servers = sd["servers"]
-    col     = user["avatar_color"] or "#6366f1"
-    init    = avatar_initials(user["username"])
+    try:
+        is_premium = user["is_premium"]
+    except Exception:
+        is_premium = 0
 
     items = [
         ("🏠", "Dashboard",    url_for("dashboard"),    "dashboard",  0),
@@ -839,17 +877,30 @@ def render_sidebar(active="", user_id=None, extra_servers=None):
         badge = f'<span class="badge-count">{cnt}</span>' if cnt > 0 else ""
         html += f'<a href="{href}" class="sidebar-item {cls}"><span class="icon">{icon}</span>{label}{badge}</a>'
 
+    try:
+        db = get_db()
+        custom_pages = db.execute("SELECT * FROM custom_pages WHERE show_sidebar=1 ORDER BY id ASC").fetchall()
+        if custom_pages:
+            html += '<div class="divider" style="margin:.6rem 0"></div><span class="sidebar-label">Pages</span>'
+            for p in custom_pages:
+                cls = "active" if active == f"page_{p['slug']}" else ""
+                html += f'<a href="/page/{p["slug"]}" class="sidebar-item {cls}"><span class="icon">{p["icon"]}</span>{p["title"]}</a>'
+    except Exception:
+        pass
+
     if servers:
         html += '<div class="divider" style="margin:.6rem 0"></div><span class="sidebar-label">Your Servers</span>'
         for s in servers:
             html += f'<a href="{url_for("server_view", server_id=s["id"])}" class="sidebar-item"><span class="icon">🖥️</span>{s["name"]}</a>'
 
+    pro_badge = '<span style="font-size:.6rem;background:linear-gradient(135deg,#f59e0b,#ec4899);color:#fff;padding:.1rem .4rem;border-radius:99px;font-weight:800;margin-left:.3rem">✦ PRO</span>' if is_premium else ""
+
     html += f"""
       </div>
       <div class="sidebar-user">
-        <div class="avatar av-sm" style="background:{col}">{init}</div>
+        {render_avatar(user, "av-sm")}
         <div style="flex:1;min-width:0">
-          <div style="font-size:.85rem;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{user["username"]}</div>
+          <div style="font-size:.85rem;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{user["username"]}{pro_badge}</div>
           <div style="font-size:.7rem;color:var(--text3)">{user["tokens"]} <span class="token-icon">⬡</span> tokens</div>
         </div>
         <a href="{url_for("logout")}" title="Logout" style="color:var(--text3);font-size:1.1rem;text-decoration:none">↩</a>
@@ -1838,15 +1889,42 @@ def profile():
     err   = session.pop("profile_err",None)
     col   = user["avatar_color"] or "#6366f1"
     init  = avatar_initials(user["username"])
+    try:
+        is_premium = user["is_premium"]
+    except Exception:
+        is_premium = 0
+
+    premium_section = ""
+    if is_premium:
+        premium_section = '''<div class="card" style="border-color:rgba(245,158,11,.3);background:linear-gradient(135deg,rgba(245,158,11,.05),rgba(236,72,153,.05))">
+          <div style="display:flex;align-items:center;gap:.8rem">
+            <div style="font-size:2rem">✦</div>
+            <div>
+              <div style="font-weight:800;font-size:1.1rem;background:linear-gradient(135deg,#f59e0b,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Nexus Premium</div>
+              <div style="color:var(--text2);font-size:.88rem;margin-top:.2rem">✓ Unlimited servers &nbsp;✓ Unlimited tokens &nbsp;✓ Exclusive PRO badge &nbsp;✓ Priority support</div>
+            </div>
+          </div>
+        </div>'''
+    else:
+        premium_section = f'''<div class="card" style="border-color:rgba(245,158,11,.2)">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem">
+            <div>
+              <div style="font-weight:800;font-size:1rem">✦ Nexus Premium</div>
+              <div style="color:var(--text2);font-size:.85rem;margin-top:.3rem">Unlimited servers · More tokens · PRO badge · Priority support</div>
+            </div>
+            <span class="badge badge-amber" style="font-size:.8rem;padding:.4rem .8rem">Ask an Admin to upgrade you</span>
+          </div>
+        </div>'''
 
     content = f"""
     {'<div class="alert alert-success">✓ '+msg+'</div>' if msg else ''}
     {'<div class="alert alert-error">⚠ '+err+'</div>' if err else ''}
+    {premium_section}
 
     <div class="profile-header">
-      <div class="avatar av-xl" style="background:{col}">{init}</div>
+      {render_avatar(user, "av-xl")}
       <div>
-        <div style="font-size:1.6rem;font-weight:800">{user['username']}</div>
+        <div style="font-size:1.6rem;font-weight:800">{user['username']}{'  <span style="font-size:.75rem;background:linear-gradient(135deg,#f59e0b,#ec4899);color:#fff;padding:.2rem .5rem;border-radius:99px;font-weight:800">✦ PRO</span>' if is_premium else ''}</div>
         <div style="color:var(--text2)">{user['email']}</div>
         <div style="margin-top:.5rem;display:flex;gap:.5rem">
           <span class="badge badge-amber">⬡ {user['tokens']} Tokens</span>
@@ -1915,6 +1993,21 @@ def profile():
           </div>
           <button type="submit" class="btn btn-secondary btn-sm">Save Color</button>
         </form>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:1rem">🖼️ Profile Picture</div>
+        <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
+          {render_avatar(user, "av-lg")}
+          <div style="font-size:.85rem;color:var(--text2)">Upload a custom profile picture (JPG/PNG, max 1MB)</div>
+        </div>
+        <form method="POST" action="{url_for('change_avatar')}" enctype="multipart/form-data">
+          <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+            <input type="file" name="avatar" accept="image/jpeg,image/png,image/gif,image/webp"
+                   style="color:var(--text2);font-size:.85rem;flex:1">
+            <button type="submit" class="btn btn-primary btn-sm">Upload</button>
+          </div>
+        </form>
+        {'<form method="POST" action="'+url_for('remove_avatar')+'"><button type="submit" class="btn btn-danger btn-xs" style="margin-top:.6rem">Remove Picture</button></form>' if user.get('avatar_data') else ''}
       </div>
     </div>"""
 
@@ -2022,6 +2115,54 @@ def change_color():
     session["profile_msg"] = "Avatar color updated."
     return redirect(url_for("profile"))
 
+
+@app.route("/profile/avatar", methods=["POST"])
+@login_required
+def change_avatar():
+    uid = session["user_id"]
+    f   = request.files.get("avatar")
+    if not f or f.filename == "":
+        session["profile_err"] = "No file selected."
+        return redirect(url_for("profile"))
+    data = f.read()
+    if len(data) > 1.5 * 1024 * 1024:
+        session["profile_err"] = "File too large (max 1MB)."
+        return redirect(url_for("profile"))
+    import base64, mimetypes
+    mime = f.mimetype or "image/jpeg"
+    b64  = base64.b64encode(data).decode()
+    data_url = f"data:{mime};base64,{b64}"
+    db = get_db()
+    db.execute("UPDATE users SET avatar_data=? WHERE id=?", (data_url, uid))
+    db.commit()
+    session["profile_msg"] = "Profile picture updated!"
+    return redirect(url_for("profile"))
+
+@app.route("/profile/avatar/remove", methods=["POST"])
+@login_required
+def remove_avatar():
+    uid = session["user_id"]
+    db  = get_db()
+    db.execute("UPDATE users SET avatar_data=NULL WHERE id=?", (uid,))
+    db.commit()
+    session["profile_msg"] = "Profile picture removed."
+    return redirect(url_for("profile"))
+
+@app.route("/page/<slug>")
+@login_required
+def custom_page_view(slug):
+    uid = session["user_id"]
+    db  = get_db()
+    page = db.execute("SELECT * FROM custom_pages WHERE slug=?", (slug,)).fetchone()
+    if not page:
+        return redirect(url_for("dashboard"))
+    content = f'''<div class="card">
+      <div style="font-size:2rem;margin-bottom:.5rem">{page["icon"]}</div>
+      <div style="font-size:1.5rem;font-weight:800;margin-bottom:1rem">{page["title"]}</div>
+      <div style="color:var(--text2);line-height:1.8;white-space:pre-wrap">{page["content"]}</div>
+    </div>'''
+    return APP_BASE(page["title"], f"page_{slug}", uid, content)
+
 # ═══════════════════════════════════════════════════════════════════
 #   BANNED PAGE
 # ═══════════════════════════════════════════════════════════════════
@@ -2047,7 +2188,7 @@ def banned_page():
 def admin_layout(title, content, tab=""):
     tabs = [
         ("users","Users"),("bans","Bans"),("tokens","Tokens"),
-        ("tickets","Tickets"),("audit","Audit Log"),
+        ("tickets","Tickets"),("audit","Audit Log"),("premium","Premium"),("pages","Pages"),
     ]
     tabs_html = "".join([
         f'<a href="/admin?tab={k}" class="tab{" active" if tab==k else ""}">{v}</a>'
@@ -2231,6 +2372,81 @@ def admin():
             </table>
           </div>
         </div>"""
+    elif tab == "premium":
+        all_users = db.execute("SELECT u.*, CASE WHEN pu.id IS NOT NULL THEN 1 ELSE 0 END as is_premium FROM users u LEFT JOIN premium_users pu ON pu.user_id=u.id ORDER BY u.id DESC").fetchall()
+        rows = ""
+        for u in all_users:
+            badge = '<span class="badge badge-amber">✦ PRO</span>' if u["is_premium"] else '<span class="badge" style="background:rgba(255,255,255,.05);color:var(--text3);border:1px solid var(--border)">Free</span>'
+            btn = f'<form class="action-form" method="POST" action="/admin/premium/remove/{u["id"]}"><button type="submit" class="btn btn-danger btn-xs">Remove</button></form>' if u["is_premium"] else f'<form class="action-form" method="POST" action="/admin/premium/grant/{u["id"]}"><button type="submit" class="btn btn-amber btn-xs">✦ Grant PRO</button></form>'
+            rows += f'''<tr>
+              <td style="font-weight:700">{u["username"]}</td>
+              <td style="color:var(--text2)">{u["email"]}</td>
+              <td>{badge}</td>
+              <td>{btn}</td>
+            </tr>'''
+        content = f'''<div class="card" style="padding:0;overflow:hidden">
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead><tr><th>Username</th><th>Email</th><th>Status</th><th>Action</th></tr></thead>
+              <tbody>{rows}</tbody>
+            </table>
+          </div>
+        </div>'''
+
+    elif tab == "pages":
+        pages = db.execute("SELECT * FROM custom_pages ORDER BY id DESC").fetchall()
+        rows = ""
+        for p in pages:
+            rows += f'''<tr>
+              <td>{p["icon"]} {p["title"]}</td>
+              <td class="mono" style="color:var(--indigo)">/page/{p["slug"]}</td>
+              <td>{"Shown" if p["show_sidebar"] else "Hidden"}</td>
+              <td>
+                <a href="/admin/pages/edit/{p["id"]}" class="btn btn-secondary btn-xs">Edit</a>
+                <form class="action-form" method="POST" action="/admin/pages/delete/{p["id"]}" onsubmit="return confirm('Delete page?')">
+                  <button type="submit" class="btn btn-danger btn-xs">Delete</button>
+                </form>
+              </td>
+            </tr>'''
+        content = f'''
+        <div class="card">
+          <div class="card-title" style="margin-bottom:1rem">➕ Create New Page</div>
+          <form method="POST" action="/admin/pages/create">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.8rem;margin-bottom:.8rem">
+              <div>
+                <label class="form-label">Page Title</label>
+                <input class="form-input" type="text" name="title" placeholder="Announcements" required>
+              </div>
+              <div>
+                <label class="form-label">URL Slug</label>
+                <input class="form-input" type="text" name="slug" placeholder="announcements" required>
+              </div>
+              <div>
+                <label class="form-label">Icon (emoji)</label>
+                <input class="form-input" type="text" name="icon" placeholder="📢" value="📄" maxlength="4">
+              </div>
+              <div>
+                <label class="form-label">Show in Sidebar</label>
+                <select class="form-input" name="show_sidebar">
+                  <option value="1">Yes</option>
+                  <option value="0">No</option>
+                </select>
+              </div>
+            </div>
+            <label class="form-label">Content</label>
+            <textarea class="form-input" name="content" rows="6" placeholder="Write your page content here..." required style="resize:vertical;margin-bottom:.8rem"></textarea>
+            <button type="submit" class="btn btn-primary btn-sm">Create Page</button>
+          </form>
+        </div>
+        <div class="card" style="padding:0;overflow:hidden">
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead><tr><th>Title</th><th>URL</th><th>Sidebar</th><th>Actions</th></tr></thead>
+              <tbody>{rows if rows else '<tr><td colspan="4" style="text-align:center;padding:2rem;color:var(--text3)">No custom pages yet</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>'''
+
     else:
         content = ""
 
@@ -2500,6 +2716,117 @@ def admin_ticket_close(ticket_id):
     db.commit()
     session["admin_msg"] = f"Ticket #{ticket_id} closed."
     return redirect(url_for("admin",tab="tickets"))
+
+
+@app.route("/admin/premium/grant/<int:user_id>", methods=["POST"])
+@admin_required
+def admin_premium_grant(user_id):
+    db   = get_db()
+    user = db.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
+    if user:
+        db.execute("INSERT OR IGNORE INTO premium_users (user_id,granted_at,granted_by) VALUES (?,?,?)", (user_id, now(), "Admin"))
+        db.execute("UPDATE users SET is_premium=1 WHERE id=?", (user_id,))
+        db.commit()
+        audit("admin_premium_grant", f"Granted PRO to {user['username']}", actor="Admin")
+        session["admin_msg"] = f"✦ PRO granted to '{user['username']}'."
+    return redirect(url_for("admin", tab="premium"))
+
+@app.route("/admin/premium/remove/<int:user_id>", methods=["POST"])
+@admin_required
+def admin_premium_remove(user_id):
+    db   = get_db()
+    user = db.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
+    if user:
+        db.execute("DELETE FROM premium_users WHERE user_id=?", (user_id,))
+        db.execute("UPDATE users SET is_premium=0 WHERE id=?", (user_id,))
+        db.commit()
+        audit("admin_premium_remove", f"Removed PRO from {user['username']}", actor="Admin")
+        session["admin_msg"] = f"PRO removed from '{user['username']}'."
+    return redirect(url_for("admin", tab="premium"))
+
+@app.route("/admin/pages/create", methods=["POST"])
+@admin_required
+def admin_page_create():
+    title = request.form.get("title","").strip()
+    slug  = request.form.get("slug","").strip().lower().replace(" ","-")
+    icon  = request.form.get("icon","📄").strip() or "📄"
+    body  = request.form.get("content","").strip()
+    show  = int(request.form.get("show_sidebar","1"))
+    if title and slug and body:
+        db = get_db()
+        try:
+            db.execute("INSERT INTO custom_pages (title,slug,icon,content,show_sidebar,created_at) VALUES (?,?,?,?,?,?)",
+                       (title, slug, icon, body, show, now()))
+            db.commit()
+            session["admin_msg"] = f"Page '{title}' created!"
+        except Exception as e:
+            session["admin_msg"] = f"Error: {e}"
+    return redirect(url_for("admin", tab="pages"))
+
+@app.route("/admin/pages/delete/<int:page_id>", methods=["POST"])
+@admin_required
+def admin_page_delete(page_id):
+    db = get_db()
+    page = db.execute("SELECT title FROM custom_pages WHERE id=?", (page_id,)).fetchone()
+    if page:
+        db.execute("DELETE FROM custom_pages WHERE id=?", (page_id,))
+        db.commit()
+        session["admin_msg"] = f"Page '{page['title']}' deleted."
+    return redirect(url_for("admin", tab="pages"))
+
+@app.route("/admin/pages/edit/<int:page_id>", methods=["GET","POST"])
+@admin_required
+def admin_page_edit(page_id):
+    db   = get_db()
+    page = db.execute("SELECT * FROM custom_pages WHERE id=?", (page_id,)).fetchone()
+    if not page:
+        return redirect(url_for("admin", tab="pages"))
+    msg = None
+    if request.method == "POST":
+        title = request.form.get("title","").strip()
+        icon  = request.form.get("icon","📄").strip() or "📄"
+        body  = request.form.get("content","").strip()
+        show  = int(request.form.get("show_sidebar","1"))
+        if title and body:
+            db.execute("UPDATE custom_pages SET title=?,icon=?,content=?,show_sidebar=? WHERE id=?",
+                       (title, icon, body, show, page_id))
+            db.commit()
+            msg = "Page updated!"
+            page = db.execute("SELECT * FROM custom_pages WHERE id=?", (page_id,)).fetchone()
+
+    content_html = f"""
+    <div style="margin-bottom:1rem"><a href="/admin?tab=pages" class="btn btn-secondary btn-sm">← Back</a></div>
+    {'<div class="alert alert-success">✓ '+msg+'</div>' if msg else ''}
+    <div class="card">
+      <div class="card-title" style="margin-bottom:1rem">✏️ Edit Page</div>
+      <form method="POST">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.8rem;margin-bottom:.8rem">
+          <div>
+            <label class="form-label">Page Title</label>
+            <input class="form-input" type="text" name="title" value="{page['title']}" required>
+          </div>
+          <div>
+            <label class="form-label">Icon (emoji)</label>
+            <input class="form-input" type="text" name="icon" value="{page['icon']}" maxlength="4">
+          </div>
+          <div>
+            <label class="form-label">Show in Sidebar</label>
+            <select class="form-input" name="show_sidebar">
+              <option value="1" {'selected' if page['show_sidebar'] else ''}>Yes</option>
+              <option value="0" {'' if page['show_sidebar'] else 'selected'}>No</option>
+            </select>
+          </div>
+          <div>
+            <label class="form-label">URL</label>
+            <div style="padding:.85rem 1rem;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text3);font-family:monospace">/page/{page['slug']}</div>
+          </div>
+        </div>
+        <label class="form-label">Content</label>
+        <textarea class="form-input" name="content" rows="10" required style="resize:vertical;margin-bottom:.8rem">{page['content']}</textarea>
+        <button type="submit" class="btn btn-primary btn-sm">Save Changes</button>
+      </form>
+    </div>"""
+    return admin_layout(f"Edit Page — {page['title']}", content_html, "pages")
 
 # ═══════════════════════════════════════════════════════════════════
 #   START
